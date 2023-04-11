@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang=en-GB>
+
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
+<title>How to profile and improve startup time</title>
+
+<link rel="stylesheet" href="dist/reset.css">
+<link rel="stylesheet" href="dist/reveal.css">
+<link rel="stylesheet" href="dist/theme/django.css">
+
+<!-- Theme used for syntax highlighted code -->
+<link rel="stylesheet" href="plugin/highlight/monokai.css">
+</head>
+
+<body>
+<div class="reveal">
+<div class="slides">
+
+<section>
+  <h1>How to profile and improve startup time</h1>
+  <h2>Adam Johnson</h2>
+</section>
+
+<section>
+  <img src=img/blog-post.png class=r-stretch>
+</section>
+
+<section>
+  <h2>Seen this?</h2>
+  <pre>
+<code class=language-console data-trim>$</code>
+<code class="language-console fragment">$ ./manage.py shell
+
+</code>
+<code class="language-console fragment" data-trim>
+$ ./manage.py shell
+
+Python 3.11.3
+Type 'copyright', 'credits' or 'license' for more information
+IPython 8.12.0 -- An enhanced Interactive Python. Type '?' for help.
+
+In [1]:
+</code></pre>
+</section>
+
+<section>
+  <h3>Startup time</h3>
+  <blockquote>Time from Python start until useful work begins</blockquote>
+  <p class=fragment>Mostly “import time”</p>
+</section>
+
+<section>
+  <h3>Startup time</h3>
+  <ul>
+    <li>Several seconds not unusal
+    <li>Longest report I’ve heard: 15 seconds
+    <li>100ms feels instant, 1s “acceptable”
+  </ul>
+</section>
+
+<section>
+  <h2><code>python -X importtime</code></h2>
+</section>
+
+<section>
+  <pre><code class=language-console data-trim>
+$ python -X importtime -c 'import django'
+import time: self [us] | cumulative | imported package
+import time:       136 |        136 |   _io
+...
+import time:       499 |       6898 |     subprocess
+...
+import time:       340 |      12228 |   django.utils.version
+import time:       206 |      12434 | django
+  </code></pre>
+</section>
+
+<section>
+  <h2>importtime-waterfall</h2>
+  <blockquote>Generate waterfalls from <code>-Ximporttime</code> tracing.</blockquote>
+</section>
+
+<section>
+  <pre><code class=language-console data-trim>
+$ importtime-waterfall --har django > django.har
+  </code></pre>
+</section>
+
+<section>
+  <img src=img/har-viewer-django.png class=r-stretch>
+</section>
+
+<section>
+  <h3>Wrapper module <code>it.py</code></h3>
+  <pre><code class=language-python data-trim>
+import os
+
+import django
+from django.urls import resolve
+
+os.environ.setdefault(
+    "DJANGO_SETTINGS_MODULE",
+    "example.settings",
+)
+django.setup()
+resolve("/")
+  </code></pre>
+</section>
+
+<section>
+  <pre><code class=language-console data-trim>
+$ importtime-waterfall --har it > it.har
+  </code></pre>
+</section>
+
+<section>
+  <img src=img/har-viewer-project-distutils.png class=r-stretch>
+</section>
+
+<section>
+  <h3>Before</h3>
+  <pre><code class=language-python data-trim>
+from distutils.util import strtobool
+
+
+def index(request):
+    show_referral_banner = strtobool(
+        request.GET.get("referred", "false")
+    )
+    ...
+  </code></pre>
+</section>
+
+<section>
+  <h3>After</h3>
+  <pre><code class=language-python data-trim>
+def index(request):
+    show_referral_banner = (
+        request.GET.get("referred", "false")
+        == "true"
+    )
+    ...
+  </code></pre>
+  <p>Eliminating distutils saves 26ms.</p>
+</section>
+
+<section>
+  <h2>Ways to improve startup time</h2>
+  <p class=fragment>⚠️ “Many drops in the bucket”</p>
+</section>
+
+<section>
+  <h3>Upgrade Python</h3>
+  <p>Python 3.11 is ~25% faster than Python 3.10</p>
+</section>
+
+<section>
+  <h3>Remove unused code</h3>
+  <p>Especially with otherwise-unused dependencies.</p>
+</section>
+
+<section>
+  <h3>Swap libraries for leaner alternatives</h3>
+  <p><code>numpy</code> ➡️ <code>statistics.linear_regression()</code></p>
+</section>
+
+<section>
+  <h3>Copy relevant bits into your project</h3>
+  <p><code>distutils.util.strtobool()</code></p>
+</section>
+
+<section>
+  <h3>Use fewer libraries</h3>
+  <p>ACME API: official package ➡️ urllib3/httpx</p>
+</section>
+
+<section>
+  <h3>Avoid import-time database queries</h3>
+  <pre>
+    <code class=language-python data-trim>
+COUNTRIES = dict(Country.objects.values_list("id", "name"))
+    </code>
+    <code class="language-python fragment" data-trim>
+from cachetools.func import ttl_cache
+
+
+@ttl_cache(maxsize=1, ttl=600)  # 10 minutes
+def get_countries():
+    return dict(Country.objects.values_list("id", "name"))
+    </code>
+  </pre>
+</section>
+
+<section>
+  <h3>Defer imports</h3>
+  <pre><code class=language-python data-trim>
+    def export_data(request):
+        import openpyxl
+
+        ...
+  </code></pre>
+</section>
+
+<section>
+  <h3>Do other kinds of work lazily</h3>
+  <pre>
+    <code class=language-python data-trim>
+      from acme import AcmeClient
+
+      acme_client = AcmeClient()
+    </code>
+    <code class="language-python fragment" data-trim>
+      from functools import cache
+      from acme import AcmeClient
+
+
+      @cache
+      def get_client():
+          return AcmeClient()
+    </code>
+  </pre>
+</section>
+
+<section>
+  <h3>Move work to another process</h3>
+  <p>System check ➡️ lint rule</p>
+</section>
+
+<section>
+  <h3>Monkey-patch a dependency</h3>
+  <p>From Open edX:</p>
+  <pre><code class=language-python data-trim>
+    import kombu.utils
+
+    kombu.utils.entrypoints = lambda namespace: iter([])
+  </code></pre>
+</section>
+
+<section>
+  <h3>Beware the cost of import time code generation</h3>
+  <p><code>Point(x, y)</code> class:</p>
+  <ul>
+    <li>dataclasses: 103 µs
+    <li>namedtuple: 18 µs
+    <li>vanilla: 3.38 µs
+  </ul>
+</section>
+
+<section>
+  <h3>Fork CPython to add “strict modules”</h3>
+  <p>Instagram did.</p>
+  <pre><code class=language-python data-trim>
+    __strict__ = True
+  </code></pre>
+  <p>Limited subset of import-time operations.</p>
+</section>
+
+<section>
+  <h1>Thank you! 🤗</h1>
+  <ul>
+    <li>Adam Johnson
+    <li>@adamchainz on Fosstodon, GitHub, &amp; Twitter
+    <li>me@adamj.eu
+    <li><a href="https://github.com/adamchainz/talk-improve-startup-time">github.com/adamchainz/talk-improve-startup-time</a>
+    <li>Books: <strong>Boost Your Django DX</strong> &amp; <strong>Speed Up Your Django Tests</strong>
+  </ul>
+</section>
+
+</div>
+</div>
+
+<script src="dist/reveal.js"></script>
+<script src="plugin/highlight/highlight.js"></script>
+<script>
+  Reveal.initialize({
+    hash: true,
+
+    controls: false,
+    // center: false,
+    progress: false,
+
+    plugins: [ RevealHighlight ]
+  });
+</script>
+</body>
+</html>
